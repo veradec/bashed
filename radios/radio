@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# --- Check for dependencies ---
+if ! command -v socat &> /dev/null || ! command -v gum &> /dev/null; then
+    echo "Error: This script requires 'gum' and 'socat' to be installed."
+    exit 1
+fi
+
+FAVORITES_FILE="$HOME/.radio_favorites"
+VOLUME_FILE="$HOME/.radio_volume"
+
+MPV_PID=""
+TITLE_UPDATER_PID=""
+
+# --- Cleanup function to be called on exit ---
+cleanup() {
+    if [ -n "$TITLE_UPDATER_PID" ] && ps -p "$TITLE_UPDATER_PID" > /dev/null; then kill "$TITLE_UPDATER_PID"; fi
+    if [ -n "$MPV_PID" ] && ps -p "$MPV_PID" > /dev/null; then kill "$MPV_PID"; fi
+    rm -f /tmp/mpvsocket
+    trap - WINCH
+    tput cnorm
+    clear
+}
+
+# --- Function to play a station and handle controls ---
+run_player() {
+    mapfile -t ALL_STATIONS < <(grep "^>" listofradios | sed 's/> //')
+    mapfile -t ALL_URLS < <(grep -v "^>" listofradios | grep -v "^$")
+
+    CURRENT_INDEX=-1
+    for i in "${!ALL_STATIONS[@]}"; do
+       if [[ "${ALL_STATIONS[$i]}" = "$1" ]]; then CURRENT_INDEX=$i; break; fi
+    done
+
+    if [ "$CURRENT_INDEX" -eq -1 ]; then return; fi
+
+    local current_station_name=""
+    local last_icy_title=""
+
+    draw_ui() {
+        local station_name="$1"
+        local icy_title="$2"
+
+        tput civis; clear
+
+        local style_args=""
+        local controls_style_args=""
+        if [ "$icy_title" == "Station Offline" ]; then
+            style_args="--foreground=240"
+            controls_style_args="--foreground=240"
+        fi
+
+        local station_box=$(gum style $style_args --padding="1 2" --border="rounded" --align="center" "$station_name")
+        local final_content
+
+        if [ -n "$icy_title" ] && [ "$icy_title" != "$station_name" ]; then
+            local icy_box=$(gum style $style_args --padding="1 2" --border="rounded" --align="center" "$icy_title")
+            final_content=$(gum join --horizontal --align="center" "$station_box" "$icy_box")
+        else
+            final_content="$station_box"
+        fi
+
+        local controls="[Controls: (n)ext | (p)rev | (9)Vol- | (0)Vol+ | (f)av | (m)enu | (q)uit | (u)mute]"
+        if [ "$3" == "fav" ]; then
+		controls="[Controls: (t)station | (s)ong | (any other key)cancel]"
+        fi
+        local content_block=$(gum join --vertical --align center "$final_content" "" "$(gum style $controls_style_args "$controls")")
+        local term_height=$(tput lines)
+        local term_width=$(tput cols)
+        local content_height=$(echo "$content_block" | wc -l)
+        local v_padding=$(( (term_height - content_height) / 2 ))
+
+        if [ "$v_padding" -gt 0 ]; then for ((i=0; i<v_padding; i++)); do echo; done; fi
+
+        echo "$content_block" | while IFS= read -r line; do
+            local visible_line=$(echo "$line" | sed -e 's/\x1b\[[0-9;]*m//g')
+            local line_width=${#visible_line}
+            local h_padding=$(( (term_width - line_width) / 2 ))
+            if [ "$h_padding" -gt 0 ]; then printf "%*s%s\n" "$h_padding" "" "$line"; else echo "$line"; fi
+        done
+    }
+
+    handle_resize() {
+        draw_ui "$current_station_name" "$last_icy_title"
+    }
+    trap handle_resize WINCH
+
+    load_stream() {
+        local index=$1
+        current_station_name="${ALL_STATIONS[$index]}"
+        local station_url="${ALL_URLS[$index]}"
+
+        if [ -n "$TITLE_UPDATER_PID" ] && ps -p "$TITLE_UPDATER_PID" > /dev/null; then kill "$TITLE_UPDATER_PID"; fi
+
+        if ! [ -n "$MPV_PID" ] || ! ps -p "$MPV_PID" > /dev/null; then
+            local initial_volume=$(cat "$VOLUME_FILE" 2>/dev/null)
+            if ! [[ "$initial_volume" =~ ^[0-9]+$ ]]; then initial_volume=50; fi
+            mpv --volume="$initial_volume" --input-ipc-server=/tmp/mpvsocket --idle --no-terminal "$station_url" &>/dev/null &
+            MPV_PID=$!
+            sleep 1
+        else
+            echo "{ \"command\": [\"loadfile\", \"$station_url\"] }" | socat - /tmp/mpvsocket &>/dev/null
+        fi
+
+        (
+            last_icy_title=""
+            while true; do
+                if ! ps -p "$MPV_PID" > /dev/null; then break; fi
+                local current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
+                
+                if [ -z "$current_title" ]; then
+                    sleep 0.5
+                    current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
+                    if [ -z "$current_title" ]; then
+                        current_title="Station Offline"
+                    fi
+                fi
+
+                if [[ "$current_title" != "$last_icy_title" ]]; then
+                    last_icy_title="$current_title"
+                    draw_ui "$current_station_name" "$current_title"
+                fi
+                sleep 3
+            done
+        ) &
+        TITLE_UPDATER_PID=$!
+    }
+
+    load_stream "$CURRENT_INDEX"
+
+    while true; do
+        read -rsn1 input
+        case "$input" in
+            'n') CURRENT_INDEX=$(( (CURRENT_INDEX + 1) % ${#ALL_STATIONS[@]} )); load_stream "$CURRENT_INDEX";;
+            'p') CURRENT_INDEX=$(( (CURRENT_INDEX - 1 + ${#ALL_STATIONS[@]}) % ${#ALL_STATIONS[@]} )); load_stream "$CURRENT_INDEX";;
+            '9') echo '{ "command": ["add", "volume", -5] }' | socat - /tmp/mpvsocket &>/dev/null; echo '{ "command": ["get_property", "volume"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":\([0-9]*\).*/\1/p' > "$VOLUME_FILE";;
+            '0') echo '{ "command": ["add", "volume", 5] }' | socat - /tmp/mpvsocket &>/dev/null; echo '{ "command": ["get_property", "volume"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":\([0-9]*\).*/\1/p' > "$VOLUME_FILE";;
+            'f')
+                draw_ui "$current_station_name" "$last_icy_title" "fav"
+                read -rsn1 fav_choice
+                if [ "$fav_choice" == "t" ]; then
+                    echo "STATION: $current_station_name" >> "$FAVORITES_FILE"
+                elif [ "$fav_choice" == "s" ]; then
+                    local current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
+                    if [ -n "$current_title" ] && [ "$current_title" != "$current_station_name" ]; then
+                        echo "SONG: $current_title" >> "$FAVORITES_FILE"
+                    fi
+                fi
+                draw_ui "$current_station_name" "$last_icy_title"
+                ;;
+            'm') break;;
+            'q') exit 0;;
+            'u') echo '{ "command": ["cycle", "mute"] }' | socat - /tmp/mpvsocket &>/dev/null;;
+        esac
+    done
+
+    trap - WINCH
+    tput cnorm
+}
+
+# --- Favorites Menu ---
+show_favorites() {
+    if [ ! -s "$FAVORITES_FILE" ]; then
+        gum style --padding="1 2" --border="rounded" "No favorites yet. Use 'f' in the player to add some."
+        sleep 2
+        return
+    fi
+
+    local chosen_fav=$(awk '{if (/^STATION:/) {print "⭐ " $0} else {print $0}}' "$FAVORITES_FILE" | gum filter --select-if-one --height=20 --prompt="Choose a favorite: ")
+    if [ -z "$chosen_fav" ]; then return; fi
+
+    local cleaned_choice=$(echo "$chosen_fav" | sed 's/^⭐ //')
+
+    if [[ $cleaned_choice == STATION:* ]]; then
+        local station_name=$(echo "$cleaned_choice" | sed 's/STATION: //')
+        run_player "$station_name"
+    else
+        gum style --padding="1 2" --border="rounded" "You can't play a song directly, sorry!"
+        sleep 2
+    fi
+}
+
+# --- Main Menu Loop ---
+trap cleanup EXIT
+touch "$FAVORITES_FILE"
+touch "$VOLUME_FILE"
+
+while true; do
+    tput cnorm; clear
+    STATIONS=$(grep "^>" listofradios | sed 's/> //'; echo "Favorites"; echo "Quit")
+    CHOSEN_STATION=$(echo "$STATIONS" | gum filter --height=20 --prompt="Choose a radio station: ")
+
+    if [ -z "$CHOSEN_STATION" ]; then break; fi
+
+    case "$CHOSEN_STATION" in
+        "Favorites") show_favorites;;
+        "Quit") break;;
+        *) 
+            if [ -n "$MPV_PID" ] && ps -p "$MPV_PID" > /dev/null; then 
+                kill "$TITLE_UPDATER_PID" &>/dev/null
+                kill "$MPV_PID" &>/dev/null
+                rm -f /tmp/mpvsocket
+            fi
+            run_player "$CHOSEN_STATION";;
+    esac
+done

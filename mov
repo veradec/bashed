@@ -1,0 +1,23 @@
+#!/bin/sh
+CUR=$(pwd)
+cd /mnt/chonky/mov
+
+if [[ "$1" == "r" || "$1" == "rand" ]]; then
+	SELECTED_MOV="$(ls | sort -R | head -n 1)"
+else
+    ls | awk '{cleaned = $0; gsub(/ *\[[^\]]*\]/, "", cleaned); gsub(/\.[^.]*$/, "", cleaned); year = ""; if (match(cleaned, /([\\ -])([0-9]{4})([\\ -]|$)/)) {year = substr(cleaned, RSTART + 1, 4); cleaned = substr(cleaned, 1, RSTART - 1) substr(cleaned, RSTART + RLENGTH);} gsub(/\./, " ", cleaned); gsub(/ +/, " ", cleaned); sub(/^ +| +$/, "", cleaned); if (year != "") {cleaned = cleaned " (" year ")";} print cleaned "\t" $0}' > /tmp/mov_list.txt
+	CLEANED_SELECTED_MOV=$(awk -F'\t' '{print $1}' /tmp/mov_list.txt | gum filter)
+	if [ $? -eq 130 ]; then
+		rm /tmp/mov_list.txt
+		exit 130
+	fi
+    SELECTED_MOV=$(grep -F "$CLEANED_SELECTED_MOV" /tmp/mov_list.txt | awk -F'\t' '{print $2}')
+    rm /tmp/mov_list.txt
+fi
+
+cd $CUR
+if [ -n "$SELECTED_MOV" ]; then
+    DISPLAY_NAME=$(echo "$SELECTED_MOV" | sed -E 's/ *\[[^\]]*\]//g; s/\.[^.]+$//; s/([[:alnum:]. ]+)\.([0-9]{4})(\..*)?$/\1 (\2)/; s/\./ /g' | tr -s ' ' | xargs)
+    gum style --border normal --margin "1" --padding "1 2" "$DISPLAY_NAME"
+	mpv "/mnt/chonky/mov/$SELECTED_MOV"
+fi
