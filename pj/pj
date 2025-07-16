@@ -1,0 +1,29 @@
+#!/bin/bash
+
+JOKES_FILE="/home/san/code/bash/pj/jokes.txt"
+LAST_JOKE_FILE=$(mktemp)
+
+trap 'rm -f "$LAST_JOKE_FILE"' EXIT
+
+get_random_joke() {
+    shuf -n 1 "$JOKES_FILE"
+}
+
+# If there's a last joke stored, read it
+if [ -s "$LAST_JOKE_FILE" ]; then
+    LAST_JOKE=$(cat "$LAST_JOKE_FILE")
+else
+    LAST_JOKE=""
+fi
+
+NEW_JOKE=$(get_random_joke)
+
+# If the file has more than one line, ensure the new joke is not the same as the last one
+if [ "$(wc -l < "$JOKES_FILE")" -gt 1 ]; then
+    while [ "$NEW_JOKE" == "$LAST_JOKE" ]; do
+        NEW_JOKE=$(get_random_joke)
+    done
+fi
+
+echo "$NEW_JOKE"
+echo "$NEW_JOKE" > "$LAST_JOKE_FILE"
