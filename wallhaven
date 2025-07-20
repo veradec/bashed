@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# Wallhaven API script
+
+# Check for dependencies
+for dep in curl jq wget imv gum; do
+    if ! command -v "$dep" &> /dev/null; then
+        echo "Error: $dep is not installed." >&2
+        exit 1
+    fi
+done
+
+# Check for search query
+if [ -z "$1" ]; then
+    echo "Usage: $0 <search query>" >&2
+    exit 1
+fi
+
+# Define temporary and final directories
+TEMP_WALLPAPER_DIR="/tmp/wal"
+FINAL_WALLPAPER_DIR="$HOME/pix/wal"
+
+# Create temporary directory and clean up previous one
+rm -rf "$TEMP_WALLPAPER_DIR"
+mkdir -p "$TEMP_WALLPAPER_DIR"
+
+# Create final directory if it doesn't exist
+mkdir -p "$FINAL_WALLPAPER_DIR"
+
+# URL encode the search query
+SEARCH_QUERY=$(jq -s -R -r @uri <<< "$1")
+
+# API URL for search
+API_SEARCH_URL="https://wallhaven.cc/api/v1/search?q=${SEARCH_QUERY}"
+
+# Get the image URLs (previews)
+IMAGE_PREVIEW_URLS=$(curl -s "$API_SEARCH_URL" | jq -r '.data[].thumbs.large')
+
+# Check if any images were found
+if [ -z "$IMAGE_PREVIEW_URLS" ]; then
+    echo "No images found for '$1'"
+    exit 0
+fi
+
+# Download the preview images with gum spin
+gum spin --title "Downloading previews..." -- bash -c '
+    TEMP_DIR_INNER="$1"
+    shift
+    while IFS= read -r url; do
+        wget -q -P "$TEMP_DIR_INNER" "$url"
+    done
+' _ "$TEMP_WALLPAPER_DIR" <<< "$IMAGE_PREVIEW_URLS"
+
+# Get list of downloaded preview files
+PREVIEW_FILES=$(find "$TEMP_WALLPAPER_DIR" -type f -name "*.jpg" -o -name "*.png" | sort)
+
+# Check if any preview files were downloaded
+if [ -z "$PREVIEW_FILES" ]; then
+    echo "No preview images downloaded."
+    rm -rf "$TEMP_WALLPAPER_DIR"
+    exit 1
+fi
+
+# Display previews with imv
+echo "Opening previews in imv. Close imv to continue selection."
+SELECTED_PREVIEWS=$(echo "$PREVIEW_FILES" | xargs imv -l)
+
+# Check if any wallpapers were selected
+if [ -z "$SELECTED_PREVIEWS" ]; then
+    echo "No wallpapers selected for full download."
+    rm -rf "$TEMP_WALLPAPER_DIR"
+    exit 0
+fi
+
+# Collect full resolution URLs
+FULL_RES_URLS_TO_DOWNLOAD=""
+echo "$SELECTED_PREVIEWS" | while IFS= read -r selected_preview_path; do
+    # Extract the wallpaper ID from the selected preview filename
+    WALLPAPER_ID=$(basename "$selected_preview_path" | sed -E 's/wallhaven-([a-zA-Z0-9]+)\..*/\1/')
+
+    # API URL for single wallpaper details
+    API_WALLPAPER_URL="https://wallhaven.cc/api/v1/w/${WALLPAPER_ID}"
+
+    # Get the full resolution image URL
+    FULL_RES_URL=$(curl -s "$API_WALLPAPER_URL" | jq -r '.data.path')
+
+    if [ -n "$FULL_RES_URL" ]; then
+        FULL_RES_URLS_TO_DOWNLOAD+="$FULL_RES_URL"
+    else
+        echo "Warning: Could not find full resolution URL for ID: $WALLPAPER_ID" >&2
+    fi
+done
+
+# Download the full resolution images with gum spin
+gum spin --title "Downloading full resolution images..." -- bash -c '
+    FINAL_DIR_INNER="$1"
+    shift
+    while IFS= read -r url; do
+        wget -q -P "$FINAL_DIR_INNER" "$url"
+    done
+' _ "$FINAL_WALLPAPER_DIR" <<< "$FULL_RES_URLS_TO_DOWNLOAD"
+
+echo "Full resolution wallpapers downloaded to: $FINAL_WALLPAPER_DIR"
+
+# Clean up temporary directory
+rm -rf "$TEMP_WALLPAPER_DIR"

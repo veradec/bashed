@@ -24,8 +24,8 @@ cleanup() {
 
 # --- Function to play a station and handle controls ---
 run_player() {
-    mapfile -t ALL_STATIONS < <(grep "^>" listofradios | sed 's/> //')
-    mapfile -t ALL_URLS < <(grep -v "^>" listofradios | grep -v "^$")
+    mapfile -t ALL_STATIONS < <(grep "^>" /home/san/code/bash/radios/listofradios | sed 's/> //')
+    mapfile -t ALL_URLS < <(grep -v "^>" /home/san/code/bash/radios/listofradios | grep -v "^$")
 
     CURRENT_INDEX=-1
     for i in "${!ALL_STATIONS[@]}"; do
@@ -109,10 +109,14 @@ run_player() {
                 local current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
                 
                 if [ -z "$current_title" ]; then
-                    sleep 0.5
+                    sleep 1
                     current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
                     if [ -z "$current_title" ]; then
-                        current_title="Station Offline"
+                        sleep 1
+                        current_title=$(echo '{ "command": ["get_property", "media-title"] }' | socat - /tmp/mpvsocket 2>/dev/null | sed -n 's/.*"data":"\([^"]*\)".*/\1/p')
+                        if [ -z "$current_title" ]; then
+                            current_title="Station Offline"
+                        fi
                     fi
                 fi
 
@@ -187,7 +191,7 @@ touch "$VOLUME_FILE"
 
 while true; do
     tput cnorm; clear
-    STATIONS=$(grep "^>" listofradios | sed 's/> //'; echo "Favorites"; echo "Quit")
+    STATIONS=$(grep "^>" /home/san/code/bash/radios/listofradios | sed 's/> //'; echo "Favorites"; echo "Quit")
     CHOSEN_STATION=$(echo "$STATIONS" | gum filter --height=20 --prompt="Choose a radio station: ")
 
     if [ -z "$CHOSEN_STATION" ]; then break; fi
